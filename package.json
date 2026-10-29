@@ -9,8 +9,12 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check backend/appointment-store.js && node --check backend/patient-store.js && node --check backend/auth.js",
+    "check": "node --check server.js && node --check backend/appointment-store.js && node --check backend/patient-store.js && node --check backend/auth.js && node --check backend/push-notifications.js && node --check service-worker.js",
     "test": "node --test",
     "verify": "npm run check && npm test"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "web-push": "^3.6.7"
   }
 }

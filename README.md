@@ -2,8 +2,8 @@
 
 ## Run locally
 
-Requires Node.js 18 or newer. No third-party packages are needed. In
-PowerShell, open this folder and run:
+Requires Node.js 18 or newer. Install the dependencies with `npm install`.
+In PowerShell, open this folder and run:
 
 ```powershell
 .\start.ps1
@@ -21,8 +21,41 @@ Patients can save appointment requests without signing in. Staff sign in with
 `drnikhil`, `drshubhangi`, or `staff_admin` and the password set in
 `STAFF_PASSWORD`. Staff can review the saved queue, receive real-time updates
 when requests arrive or statuses change, update appointment status, and export
-a CSV report. The doctor WhatsApp action opens a pre-filled message for staff
-to review and send; the site does not send messages automatically.
+an Excel-compatible CSV report. Phone numbers and dates are exported as text so
+spreadsheet software does not silently convert them.
+
+## Doctor browser push alerts
+
+The server can send a generic browser push alert after a booking is saved. Push
+alerts contain no patient name, phone number, or treatment details. To configure
+the server, generate a VAPID key pair once:
+
+```powershell
+npx web-push generate-vapid-keys
+```
+
+Set the generated keys and a contact address in the PowerShell window before
+starting the server:
+
+```powershell
+$env:VAPID_PUBLIC_KEY = "<generated public key>"
+$env:VAPID_PRIVATE_KEY = "<generated private key>"
+$env:VAPID_SUBJECT = "mailto:clinic@example.com"
+.\start.ps1
+```
+
+Keep the private key secret and use the same key pair after restarts. On the
+doctor's device, open the site over HTTPS, sign in to the Staff Console, and
+choose **Enable alerts on this device**. Repeat on each device that should
+receive alerts. The browser must permit notifications; delivery also depends on
+the device's browser and operating-system notification settings. Subscriptions
+are stored in `data/push-subscriptions.json` and should be kept private.
+
+The included server binds only to `127.0.0.1`. Push is suitable for local
+development on that computer, but a doctor's phone cannot reach this local
+server. Mobile alerts require a properly secured, HTTPS-hosted deployment and
+secure handling of the hospital's data; this repository is not configured for
+public hosting.
 
 ## Appointment status tracking
 
@@ -96,8 +129,10 @@ entered name and phone number.
 
 - `server.js` serves the site and HTTP API, including the staff-only live event stream.
 - `backend/appointment-store.js` validates and persists requests in JSON.
+- `backend/push-notifications.js` stores staff browser subscriptions and sends booking alerts.
 - `backend/patient-store.js` stores completed visit records and salted PIN hashes.
 - `backend/auth.js` manages expiring staff sessions.
+- `service-worker.js` displays browser push alerts and opens the staff sign-in screen.
 - `data/appointments.json` stores the appointment queue.
 - `data/patients.json` stores hospital patient history and PIN hashes.
 

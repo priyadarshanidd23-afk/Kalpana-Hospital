@@ -76,6 +76,10 @@ test("local website serves booking, staff queue, persistence, and live updates",
       PORT: String(port),
       APPOINTMENTS_FILE: dataFile,
       PATIENTS_FILE: path.join(directory, "patients.json"),
+      PUSH_SUBSCRIPTIONS_FILE: path.join(directory, "push-subscriptions.json"),
+      VAPID_PUBLIC_KEY: "",
+      VAPID_PRIVATE_KEY: "",
+      VAPID_SUBJECT: "",
       STAFF_PASSWORD: password
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -121,6 +125,10 @@ test("local website serves booking, staff queue, persistence, and live updates",
   });
 
   assert.equal((await (await fetch(`${baseUrl}/api/health`)).json()).ok, true);
+  assert.equal((await fetch(`${baseUrl}/api/push/config`)).status, 401);
+  const serviceWorker = await fetch(`${baseUrl}/service-worker.js`);
+  assert.equal(serviceWorker.status, 200);
+  assert.match(serviceWorker.headers.get("content-type"), /javascript/);
   assert.equal((await fetch(`${baseUrl}/api/appointments`)).status, 401);
   assert.equal((await fetch(`${baseUrl}/api/patients/history?name=Patient`)).status, 401);
   assert.equal(
@@ -185,6 +193,29 @@ test("local website serves booking, staff queue, persistence, and live updates",
   });
   assert.equal(login.status, 200);
   const cookie = login.headers.get("set-cookie").split(";")[0];
+  const pushConfigResponse = await fetch(`${baseUrl}/api/push/config`, {
+    headers: { Cookie: cookie }
+  });
+  assert.equal(pushConfigResponse.status, 200);
+  assert.deepEqual(await pushConfigResponse.json(), { configured: false, publicKey: null });
+  assert.equal((await fetch(`${baseUrl}/api/push/subscriptions`, {
+    method: "POST",
+    headers: {
+      Origin: baseUrl,
+      "Content-Type": "application/json",
+      Cookie: cookie
+    },
+    body: JSON.stringify({})
+  })).status, 503);
+  assert.equal((await fetch(`${baseUrl}/api/push/subscriptions`, {
+    method: "POST",
+    headers: {
+      Origin: baseUrl.replace("http://", "https://"),
+      "Content-Type": "application/json",
+      Cookie: cookie
+    },
+    body: JSON.stringify({})
+  })).status, 503);
   const privateQueue = await fetch(`${baseUrl}/api/appointments`, { headers: { Cookie: cookie } });
   assert.equal((await privateQueue.json()).appointments.length, 1);
   const unauthorizedRecord = await fetch(`${baseUrl}/api/patients/records`, {

@@ -1,15 +1,27 @@
+require('dotenv').config();
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createAppointmentStore } = require("./backend/appointment-store");
 const { createPatientStore, normalizePhone } = require("./backend/patient-store");
 const { createSessionManager, passwordMatches } = require("./backend/auth");
+const { createPushNotifier } = require("./backend/push-notifications");
+const webPush = require("web-push");
 
 const root = __dirname;
 const dataFile = process.env.APPOINTMENTS_FILE || path.join(root, "data", "appointments.json");
 const patientsFile = process.env.PATIENTS_FILE || path.join(root, "data", "patients.json");
+const pushSubscriptionsFile = process.env.PUSH_SUBSCRIPTIONS_FILE
+  || path.join(root, "data", "push-subscriptions.json");
 const appointmentStore = createAppointmentStore(dataFile);
 const patientStore = createPatientStore(patientsFile);
+const pushNotifier = createPushNotifier({
+  dataFile: pushSubscriptionsFile,
+  webPush,
+  publicKey: process.env.VAPID_PUBLIC_KEY,
+  privateKey: process.env.VAPID_PRIVATE_KEY,
+  subject: process.env.VAPID_SUBJECT
+});
 const port = Number(process.env.PORT || 3000);
 const host = "127.0.0.1";
 const sessionDuration = 8 * 60 * 60 * 1000;
@@ -59,7 +71,8 @@ function requireStaff(request, response) {
 
 function requireSameOrigin(request, response) {
   const origin = request.headers.origin;
-  if (!origin || origin === `http://${request.headers.host}`) return true;
+  const hostOrigin = request.headers.host;
+  if (!origin || origin === `http://${hostOrigin}` || origin === `https://${hostOrigin}`) return true;
   sendJson(response, 403, { error: "Cross-origin request blocked." });
   return false;
 }
@@ -126,8 +139,9 @@ async function handleRequest(request, response) {
       return;
     }
     const session = staffSessions.create();
+    const secureCookie = request.headers.origin === `https://${request.headers.host}` ? "; Secure" : "";
     sendJson(response, 200, { ok: true, username }, {
-      "Set-Cookie": `clinic_session=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionDuration / 1000}`
+      "Set-Cookie": `clinic_session=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionDuration / 1000}${secureCookie}`
     });
     return;
   }
@@ -135,8 +149,9 @@ async function handleRequest(request, response) {
   if (request.method === "POST" && url.pathname === "/api/logout") {
     if (!requireSameOrigin(request, response)) return;
     staffSessions.revoke(request);
+    const secureCookie = request.headers.origin === `https://${request.headers.host}` ? "; Secure" : "";
     sendJson(response, 200, { ok: true }, {
-      "Set-Cookie": "clinic_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+      "Set-Cookie": `clinic_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureCookie}`
     });
     return;
   }
@@ -147,7 +162,40 @@ async function handleRequest(request, response) {
     if (input && input.emergency === true && !requireStaff(request, response)) return;
     const appointment = await appointmentStore.add(input);
     broadcastEvent({ type: "appointment", appointment });
+    pushNotifier.notifyNewAppointment().catch(error => {
+      console.error("Could not deliver browser push notifications:", error.message);
+    });
     sendJson(response, 201, { appointment });
+    return;
+  }
+
+  if (url.pathname === "/api/push/config" && request.method === "GET") {
+    if (!requireStaff(request, response)) return;
+    sendJson(response, 200, {
+      configured: pushNotifier.configured,
+      publicKey: pushNotifier.publicKey
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/push/subscriptions" && request.method === "POST") {
+    if (!requireSameOrigin(request, response)) return;
+    if (!requireStaff(request, response)) return;
+    if (!pushNotifier.configured) {
+      sendJson(response, 503, { error: "Browser push notifications are not configured on this server." });
+      return;
+    }
+    await pushNotifier.subscribe(await readRequestJson(request));
+    sendJson(response, 201, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/api/push/subscriptions" && request.method === "DELETE") {
+    if (!requireSameOrigin(request, response)) return;
+    if (!requireStaff(request, response)) return;
+    const input = await readRequestJson(request);
+    await pushNotifier.unsubscribe(input && input.endpoint);
+    sendJson(response, 200, { ok: true });
     return;
   }
 
@@ -298,6 +346,7 @@ async function handleRequest(request, response) {
   const staticFiles = {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/index.html": ["index.html", "text/html; charset=utf-8"],
+    "/service-worker.js": ["service-worker.js", "application/javascript; charset=utf-8"],
     "/image%203.jpeg": ["image 3.jpeg", "image/jpeg"],
     "/image%207.jpeg": ["image 7.jpeg", "image/jpeg"],
     "/image%208.jpeg": ["image 8.jpeg", "image/jpeg"]
@@ -320,6 +369,7 @@ async function handleRequest(request, response) {
 async function start() {
   await appointmentStore.initialize();
   await patientStore.initialize();
+  await pushNotifier.initialize();
 
   const server = http.createServer((request, response) => {
     handleRequest(request, response).catch(error => {
@@ -338,6 +388,9 @@ async function start() {
     console.log(`Kalpana Hospital server listening at http://${host}:${port}`);
     if (!process.env.STAFF_PASSWORD) {
       console.warn("Staff sign-in is disabled until STAFF_PASSWORD is configured.");
+    }
+    if (!pushNotifier.configured) {
+      console.warn("Browser push notifications are disabled until VAPID credentials are configured.");
     }
   });
 }

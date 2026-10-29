@@ -786,7 +786,7 @@
 <div class="flex flex-wrap items-center gap-2">
 <button class="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer" onclick="exportExcelReport()">
 <span class="material-symbols-outlined text-sm text-slate-600">file_download</span>
-<span>Export CSV</span>
+<span>Export Excel-compatible CSV</span>
 </button>
 <button class="px-3.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer active:scale-95" onclick="triggerEmergencyWalkin()">
 <span class="material-symbols-outlined text-base animate-pulse">emergency</span>
@@ -797,6 +797,16 @@
 <span>Sign Out / Close</span>
 </button>
 </div>
+</div>
+<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-indigo-200 bg-indigo-50/70 px-4 py-3" id="pushNotificationPanel">
+<div class="flex items-start gap-2.5">
+<span class="material-symbols-outlined text-indigo-700 text-xl">notifications_active</span>
+<div>
+<p class="text-xs font-semibold text-indigo-950">Appointment alerts on this device</p>
+<p class="text-[11px] leading-relaxed text-indigo-800" id="pushNotificationStatus">Checking browser push support…</p>
+</div>
+</div>
+<button class="shrink-0 rounded-xl bg-indigo-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50" id="pushNotificationButton" onclick="togglePushNotifications()" type="button" disabled>Enable alerts</button>
 </div>
 <!-- KPI Stat Cards -->
 <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 shrink-0">
@@ -835,10 +845,10 @@
 <div class="p-3.5 rounded-2xl bg-indigo-50/70 border border-indigo-200/70 col-span-2 sm:col-span-1">
 <div class="flex items-center justify-between text-indigo-800 text-[11px] font-semibold">
 <span>Doctor Alerts</span>
-<span class="material-symbols-outlined text-sm text-indigo-600">sms</span>
+<span class="material-symbols-outlined text-sm text-indigo-600">notifications_active</span>
 </div>
-<div class="text-2xl font-bold font-mono text-indigo-900 mt-1">Local</div>
-<p class="text-[10px] text-indigo-700 mt-0.5">No SMS integration</p>
+<div class="text-2xl font-bold font-mono text-indigo-900 mt-1">Push</div>
+<p class="text-[10px] text-indigo-700 mt-0.5">New booking alerts</p>
 </div>
 </div>
 <!-- Main Split Workspace: Left Patient Queue Table (7 cols) / Right Operatory Details (5 cols) -->
@@ -917,10 +927,6 @@
 </div>
 </div>
 <div class="pt-2 border-t border-slate-200/70 flex gap-2">
-<button class="flex-1 py-2 px-2.5 rounded-xl bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 text-xs font-semibold flex items-center justify-center gap-1 transition-colors cursor-pointer active:scale-95" onclick="dispatchDoctorHandsetSMS()">
-<span class="material-symbols-outlined text-sm text-teal-700">chat</span>
-<span>Open Doctor WhatsApp</span>
-</button>
 <button class="flex-1 py-2 px-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center justify-center gap-1 transition-colors cursor-pointer active:scale-95" onclick="markCurrentChairComplete()">
 <span class="material-symbols-outlined text-sm">done_all</span>
 <span>Complete Chair</span>
@@ -1010,6 +1016,9 @@ Local log only
   let staffSignedIn = false;
   let appointmentStream = null;
   let appointmentTrackingTimer = null;
+  let pushRegistration = null;
+  let pushSubscription = null;
+  let pushPublicKey = null;
 
   function setDefaultAppointmentDate() {
     const dateInput = document.getElementById('modalBookDate');
@@ -1088,6 +1097,104 @@ Local log only
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'The request could not be completed.');
     return payload;
+  }
+
+  function setPushNotificationStatus(message, enabled) {
+    const status = document.getElementById('pushNotificationStatus');
+    const button = document.getElementById('pushNotificationButton');
+    if (status) status.textContent = message;
+    if (button) {
+      button.disabled = !enabled;
+      button.textContent = pushSubscription ? 'Disable alerts' : 'Enable alerts';
+    }
+  }
+
+  function decodeApplicationServerKey(value) {
+    const padded = value.replace(/-/g, '+').replace(/_/g, '/')
+      .padEnd(Math.ceil(value.length / 4) * 4, '=');
+    return Uint8Array.from(atob(padded), character => character.charCodeAt(0));
+  }
+
+  async function refreshPushNotificationState() {
+    const panel = document.getElementById('pushNotificationPanel');
+    if (panel) panel.classList.remove('hidden');
+    pushSubscription = null;
+    pushPublicKey = null;
+
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      setPushNotificationStatus('This browser does not support push notifications.', false);
+      return;
+    }
+
+    try {
+      const config = await apiRequest('/api/push/config');
+      if (!config.configured) {
+        setPushNotificationStatus('Push is not configured on the server. Configure VAPID keys and use HTTPS hosting.', false);
+        return;
+      }
+      pushPublicKey = config.publicKey;
+      pushRegistration = await navigator.serviceWorker.register('/service-worker.js');
+      await navigator.serviceWorker.ready;
+      pushSubscription = await pushRegistration.pushManager.getSubscription();
+      if (pushSubscription) {
+        await apiRequest('/api/push/subscriptions', {
+          method: 'POST',
+          body: JSON.stringify(pushSubscription.toJSON())
+        });
+      }
+      if (Notification.permission === 'denied' && !pushSubscription) {
+        setPushNotificationStatus('Notifications are blocked in this browser. Allow them in browser settings to enable alerts.', false);
+      } else {
+        setPushNotificationStatus(pushSubscription
+          ? 'This device will receive an alert when a new appointment is booked.'
+          : 'Enable alerts on this device to receive new appointment notifications.',
+        Notification.permission !== 'denied' || Boolean(pushSubscription));
+      }
+    } catch (error) {
+      setPushNotificationStatus(`Could not check push notifications: ${error.message}`, false);
+    }
+  }
+
+  async function togglePushNotifications() {
+    const button = document.getElementById('pushNotificationButton');
+    if (button) button.disabled = true;
+    try {
+      if (pushSubscription) {
+        await apiRequest('/api/push/subscriptions', {
+          method: 'DELETE',
+          body: JSON.stringify({ endpoint: pushSubscription.endpoint })
+        });
+        await pushSubscription.unsubscribe();
+        pushSubscription = null;
+        setPushNotificationStatus('Alerts are disabled on this device.', true);
+        return;
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setPushNotificationStatus('Allow notifications in your browser to receive appointment alerts.', false);
+        return;
+      }
+      const subscription = await pushRegistration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: decodeApplicationServerKey(pushPublicKey)
+      });
+      await apiRequest('/api/push/subscriptions', {
+        method: 'POST',
+        body: JSON.stringify(subscription.toJSON())
+      });
+      pushSubscription = subscription;
+      setPushNotificationStatus('This device will receive an alert when a new appointment is booked.', true);
+    } catch (error) {
+      setPushNotificationStatus(`Could not update push settings: ${error.message}`, false);
+      showToast(`Could not update push notifications: ${error.message}`);
+    } finally {
+      if (button) {
+        button.disabled = !pushPublicKey || !pushRegistration
+          || (typeof Notification !== 'undefined'
+            && Notification.permission === 'denied' && !pushSubscription);
+      }
+    }
   }
 
   function escapeHtml(value) {
@@ -1571,7 +1678,7 @@ Local log only
       setDefaultAppointmentDate();
       closePatientModal();
       showToast(`${result.appointment.token} request saved.`);
-      alert(`Appointment request saved.\n\nRequest ${result.appointment.token}: ${result.appointment.date} at ${result.appointment.slot} with ${result.appointment.doctor}.\n\nTo view appointment status or past visit history, open the separate Patient Portal. No SMS has been sent.`);
+      alert(`Appointment request saved.\n\nRequest ${result.appointment.token}: ${result.appointment.date} at ${result.appointment.slot} with ${result.appointment.doctor}.\n\nTo view appointment status or past visit history, open the separate Patient Portal.`);
     } catch (error) {
       showToast(`Could not save request: ${error.message}`);
     } finally {
@@ -1648,6 +1755,7 @@ Local log only
       connectAppointmentStream();
       closeStaffLoginModal();
       openDoctorConsole();
+      await refreshPushNotificationState();
       showToast(`Signed in as ${currentActiveDoctor}.`);
     } catch (error) {
       setAuthError(error.message);
@@ -1868,21 +1976,6 @@ Local log only
     }
   }
 
-  function dispatchDoctorHandsetSMS() {
-    const item = queueList[selectedQueueIndex];
-    if (!item) return;
-    const doctorPhone = item.doctor.includes('Shubhangi') ? '919356997148' : '917447226136';
-    const message = `Appointment ${item.token}: ${item.patient}, ${item.phone || 'phone not provided'}, ${item.treatment}, ${item.date} at ${item.slot}.`;
-    const whatsappUrl = `https://wa.me/${doctorPhone}?text=${encodeURIComponent(message)}`;
-    const openedWindow = window.open(whatsappUrl, '_blank');
-    if (openedWindow) {
-      openedWindow.opener = null;
-      showToast('WhatsApp opened. Review the appointment and press Send there.');
-    } else {
-      showToast('WhatsApp was blocked by the browser. Allow pop-ups or copy the appointment details.');
-    }
-  }
-
   async function sendQuickPatientAlert(index) {
     const item = queueList[index];
     if (!item) return;
@@ -1906,23 +1999,24 @@ Local log only
 
   function exportExcelReport() {
     const columns = ['Token', 'Patient', 'Phone', 'Date', 'Slot', 'Doctor', 'Treatment', 'Status'];
-    const csvCell = value => {
+    const csvCell = (value, preserveAsText = false) => {
       let text = String(value ?? '');
-      if (/^[=+\-@]/.test(text)) text = `'${text}`;
+      if (preserveAsText) text = `="${text.replace(/"/g, '""')}"`;
+      else if (/^[=+\-@]/.test(text)) text = `'${text}`;
       return `"${text.replace(/"/g, '""')}"`;
     };
     const rows = queueList.map(item => [
       item.token, item.patient, item.phone, item.date, item.slot,
       item.doctor, item.treatment, item.status
-    ]);
-    const csv = [columns, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    ].map((value, index) => csvCell(value, index === 2 || index === 3)));
+    const csv = [columns.map(csvCell), ...rows].map(row => row.join(',')).join('\r\n');
+    const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
     link.download = 'kalpana-appointments.csv';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast(`${queueList.length} appointment(s) exported as CSV.`);
+    showToast(`${queueList.length} appointment(s) exported as Excel-compatible CSV.`);
   }
 
   // Simple Toast UI
@@ -1944,6 +2038,9 @@ Local log only
     updateClinicStatus();
     renderDoctorQueue();
     updateOperatoryPane(-1);
+    if (new URLSearchParams(window.location.search).get('staff') === '1') {
+      openStaffLoginModal();
+    }
   });
 
   // Close modals on escape key
